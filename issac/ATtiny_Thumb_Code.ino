@@ -5,6 +5,7 @@
  * Written by Isaac Chasteau
  --------------------------------------------------------------------------------------------------------------------*/
 
+#include <SoftwareServo.h>
 #include <TinyWireS.h>
 #include <ctype.h>
 
@@ -12,16 +13,7 @@
 #define TWI_RX_BUFFER_SIZE ( 16 )
 #endif
 
-/*--------------------------------------------------------------------------------------------------------------------
- * ATtiny84 I2C addresses
- * Index finger 0x4
- * Middle finger 0x5
- * Ring finger 0x6
- * Pinky finger 0x7
- * Thumb 0x8
- --------------------------------------------------------------------------------------------------------------------*/
- 
-#define I2C_SLAVE_ADDRESS 0x4// the 7-bit address (remember to change this when adapting this example)
+#define I2C_SLAVE_ADDRESS 0x8 // the 7-bit address (remember to change this when adapting this example)
 
 //Defining the H-Bridge pins
 #define IA_MCP PB2
@@ -30,6 +22,7 @@
 #define IB_Proximal PB1
 #define IA_Tension PA5//Physical pin 8
 #define IB_Tension PA3//Physical pin 10(Digital)
+#define servoPin 10
 
 //Defining the potentiometer pins
 #define Proximal_pin PA2
@@ -62,16 +55,20 @@
 #define minCC 0
 #define maxCC 102
 
+#define minServo 0
+#define maxServo 180
+
+SoftwareServo thumbServo;
+
 int proximal_angle = 0;
 int MCP_angle = 0;
+int servoAngle = 0;
 
-//int previousTime = 0;
 double previous_error = 0;
 double integral = 0;
 double derivative = 0;
 double dt = 10;
 
-//int previousTime1 = 0;
 double previous_error1 = 0;
 double integral1 = 0;
 double derivative1 = 0;
@@ -81,9 +78,9 @@ int MCP_setPoint = 45;
 int proximal_setPoint = 45;
 int co_contraction = 0;
 
-bool PID_cc_flag = false;
+bool PID_cc_flag = true;
 bool grip_flag = false;
-bool PID_flag = true;
+bool PID_flag = false;
 /*-------------------------------------------------------------------------------------------------------------------------------------------------*/
 
 volatile uint8_t jointFeedback[] =
@@ -92,21 +89,23 @@ volatile uint8_t jointFeedback[] =
     0x0, 
 };
 
-volatile uint8_t fingerVariables[] = //Holds the MCP and Proximal 
+volatile uint8_t thumbVariables[] = //Holds the MCP and Proximal 
 {
-    0x1F, //MCP angle
-    0x1F, //Proximal angle
+    0x1E, //MCP angle
+    0x1E, //Proximal angle
     0x00, //Co-Contraction
+    0x5A, //Servo angle
 };
 
 volatile uint8_t bufferArray[] = //buffer 
 {
-    0x1F, //MCP angle
-    0x1F, //Proximal angle
+    0x1E, //MCP angle
+    0x1E, //Proximal angle
     0x00, //Co-Contraction
+    0x5A, //Servo angle
 };
 //const byte reg_size = sizeof(i2c_regs);
-const byte fingerVariables_reg_size = sizeof(fingerVariables);
+const byte thumbVariables_reg_size = sizeof(thumbVariables);
 const byte two_reg_position_reg_size = sizeof(jointFeedback);
 volatile byte reg_position = 0;
 volatile byte three_reg_position = 0;
@@ -118,22 +117,8 @@ volatile byte reg_pos = 0;
 void updateJointValues(void){
   proximal_angle = analogRead(Proximal_pin);//readADC(2);//analogRead(Proximal_pin);
   MCP_angle = analogRead(MCP_pin);//readADC(1);//analogRead(MCP_pin);
-  if(I2C_SLAVE_ADDRESS == 0x4){//Index finger
-    proximal_angle = map(proximal_angle, 400, 860, 0, 90);
-    MCP_angle = map(MCP_angle, 550, 840, 0, 90);
-  }else if(I2C_SLAVE_ADDRESS == 0x5){//Middle finger
-    proximal_angle = map(proximal_angle, 516, 988, 0, 90);
-    MCP_angle = map(MCP_angle, 576, 1020, 0, 90);
-  }else if(I2C_SLAVE_ADDRESS == 0x6){//Ring finger
-    proximal_angle = map(proximal_angle, 590, 1020, 0, 90);
-    MCP_angle = map(MCP_angle, 340, 804, 0, 90);
-  }else if(I2C_SLAVE_ADDRESS == 0x7){//Pinky finger
-    proximal_angle = map(proximal_angle, 330, 744, 0, 90);
-    MCP_angle = map(MCP_angle, 550, 950, 0, 90);
-  }else if(I2C_SLAVE_ADDRESS == 0x8){//Thumb
-    proximal_angle = map(proximal_angle, 390, 820, 0, 90);
-    MCP_angle = map(MCP_angle, 410, 840, 0, 90);
-  }
+  proximal_angle = map(proximal_angle, 390, 820, 0, 90);
+  MCP_angle = map(MCP_angle, 410, 840, 0, 90);
   jointFeedback[0] = MCP_angle;
   jointFeedback[1] = proximal_angle;
 }
@@ -157,7 +142,7 @@ void receiveEvent(uint8_t howMany)
   if (howMany < 1)return;// Sanity-check
   if (howMany > TWI_RX_BUFFER_SIZE) return;
   if (!howMany) return; // This write was only to set the buffer for next read
-  if (howMany != 3)return;//if it doesn't receive 3 bytes
+  if (howMany != 4)return;//if it doesn't receive 4 bytes
   while(howMany--)
   {
     bufferArray[reg_pos] = TinyWireS.receive();//read in the data and stores it.
@@ -165,7 +150,7 @@ void receiveEvent(uint8_t howMany)
       bufferArray[reg_pos] = 0;
     }
     reg_pos++;
-    if (reg_pos >= fingerVariables_reg_size)
+    if (reg_pos >= thumbVariables_reg_size)
     {
       reg_pos = 0;
       break;
@@ -175,9 +160,10 @@ void receiveEvent(uint8_t howMany)
   if(bufferArray[0] < minMCPAngle || bufferArray[0] > maxMCPAngle )return;
   if(bufferArray[1] < minProximalAngle || bufferArray[1] > maxProximalAngle )return;
   if(bufferArray[2] < minCC || bufferArray[2] > maxCC )return;
+  if(bufferArray[3] < minServo || bufferArray[3] > maxServo )return;
   
-  for(int i = 0; i < fingerVariables_reg_size; i++){//Sets the fingerVariable array to the bufferArray values
-    fingerVariables[i] = bufferArray[i];
+  for(int i = 0; i < thumbVariables_reg_size; i++){//Sets the fingerVariable array to the bufferArray values
+    thumbVariables[i] = bufferArray[i];
   }
   update_setpoints();
 }
@@ -185,9 +171,10 @@ void receiveEvent(uint8_t howMany)
 /*-------------------------------------------------------------------------------------------------------------------------------------------------*/
 
 void update_setpoints(void){
-  MCP_setPoint = fingerVariables[0];
-  proximal_setPoint = fingerVariables[1];
-  co_contraction = fingerVariables[2];
+  MCP_setPoint = thumbVariables[0];
+  proximal_setPoint = thumbVariables[1];
+  co_contraction = thumbVariables[2];
+  servoAngle = thumbVariables[3];
 
   if(co_contraction == 0){
     PID_flag = true;
@@ -313,12 +300,12 @@ void setFingerPos(int MmTheta, int MpTheta){
     Mm_PWM *= ((double)Mm_PWM / ((double)Mm_PWM + (double)Mp_PWM));
     Mp_PWM *= ((double)Mm_PWM / ((double)Mm_PWM + (double)Mp_PWM));
   }
-  fingerMotorControl(Mm_PWM, Mp_PWM);
+  thumbMotorControl(Mm_PWM, Mp_PWM);
 }
 
 /*-------------------------------------------------------------------------------------------------------------------------------------------------*/
 
-void fingerMotorControl(int Mm_PWM, int Mp_PWM){
+void thumbMotorControl(int Mm_PWM, int Mp_PWM){
   int Mt_PWM = Mm_PWM + Mp_PWM;
   if(abs(Mt_PWM) > 255){
     return;//check the values are in range
@@ -332,6 +319,7 @@ void fingerMotorControl(int Mm_PWM, int Mp_PWM){
   motorDriver(Mt_PWM, 2);//Tension line
   motorDriver(Mp_PWM, 1);//Proximal line
   motorDriver(Mm_PWM, 0);//MCP line
+  thumbServo.write(servoAngle);
 }
 
 /*-------------------------------------------------------------------------------------------------------------------------------------------------*/
@@ -381,6 +369,7 @@ void co_contraction_PID(int co_contraction){
   unsigned long startTime = millis();//get current time
   while(millis() - startTime < 800  ){//loop for 800ms
     setFingerPos(MCP_setPoint, proximal_setPoint);//The PPAP control
+    SoftwareServo::refresh();//Called here because it needs to be called at least every 50ms
   }
   Co_Contraction(co_contraction);//Sets the co_contraction
   PID_cc_flag = false;
@@ -423,13 +412,14 @@ void setup()
   PORTB &= (~(1<<IB_Proximal));//sets pin low
   analogWrite(IA_Tension, 0);
   PORTA &= (~(1<<IB_Tension));//sets pin low
+
+  thumbServo.attach(servoPin);//servo pin  
   
-  tighten_pulleys(3300);
+  tighten_pulleys(2500);
   
   TinyWireS.begin(I2C_SLAVE_ADDRESS);
   TinyWireS.onReceive(receiveEvent);
   TinyWireS.onRequest(requestEvent);
-
 }
 
 /*-------------------------------------------------------------------------------------------------------------------------------------------------*/
@@ -443,7 +433,9 @@ void loop()
   }else if(grip_flag){
     grip(800, 70, 70);
   }
+  
 //Might need to add this into the pidcc loop
+  SoftwareServo::refresh();//needs to be called at least every 50ms
   TinyWireS_stop_check();//Needs to be a tight loop apparently
 }
 
