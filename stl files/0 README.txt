@@ -15,4 +15,5 @@
 10x Pivot Pins* as seen in the included STL file
 6X  Pivot Pins* as seen in the included STL file without the D shaft cut away
 
-*These require hand making optimally with use of a lathe.
+*These require hand making optimally with use of a mill
+it is recommended for these to be made of steel or similar
